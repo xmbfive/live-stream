@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Screen Share Broadcaster</title>
+    <meta charset="UTF-8">
+    <style>
+        body { font-family: Arial, sans-serif; background: #1a1a1a; color: #fff; margin: 0; padding: 20px; }
+        video { width: 100%; max-width: 800px; background: #000; border-radius: 8px; margin: 20px 0; }
+        .controls { position: fixed; bottom: 20px; left: 20px; right: 20px; background: rgba(0,0,0,0.9); padding: 15px; border-radius: 10px; display: flex; gap: 10px; flex-wrap: wrap; justify-content: center; }
+        button { padding: 10px 20px; font-size: 14px; font-weight: bold; border: none; border-radius: 5px; cursor: pointer; transition: all 0.2s; }
+        button:active { transform: scale(0.95); }
+        .btn-primary { background: #2ecc71; color: #fff; }
+        .btn-danger { background: #e74c3c; color: #fff; }
+        .btn-mic { background: #3498db; color: #fff; }
+        .btn-audio { background: #f39c12; color: #fff; }
+        .status { position: fixed; top: 20px; right: 20px; background: rgba(0,0,0,0.7); padding: 8px 15px; border-radius: 20px; font-size: 12px; font-family: monospace; }
+        .room-input { margin: 20px 0; padding: 15px; background: #2a2a2a; border-radius: 8px; }
+        input { padding: 10px; font-size: 16px; margin: 5px; border-radius: 5px; border: none; }
+        .info { font-size: 12px; color: #aaa; margin-top: 10px; }
+    </style>
+</head>
+<body>
+    <h2>🎥 Screen Share Broadcaster</h2>
+    
+    <div class="room-input">
+        <label>Room ID (share this with viewer):</label><br>
+        <input type="text" id="roomId" placeholder="Enter room name" value="room123">
+        <button id="createRoomBtn" class="btn-primary">Create/Join Room</button>
+    </div>
+    
+    <video id="preview" autoplay muted playsinline style="display:none;"></video>
+    
+    <div class="controls" style="display:none;" id="controls">
+        <button id="stopBtn" class="btn-danger">⏹️ Stop Sharing</button>
+        <button id="micBtn" class="btn-mic">🎤 Mic ON</button>
+        <button id="audioBtn" class="btn-audio">🔊 System Audio OFF</button>
+    </div>
+    
+    <div class="status" id="status">⚫ Not connected</div>
+    <div class="info" id="info"></div>
+
+    <script src="https://cdn.socket.io/4.5.0/socket.io.min.js"></script>
+    <script>
+        let localStream = null;
+        let peerConnection = null;
+        let socket = null;
+        let roomId = null;
+        let micEnabled = true;
+        let systemAudioEnabled = false;
+        
+        const configuration = {
+            iceServers: [
+                { urls: 'stun:stun.l.google.com:19302' },
+                { urls: 'stun:stun1.l.google.com:19302' },
+                { urls: 'stun:stun2.l.google.com:19302' }
+            ]
+        };
+        
+        async function createRoom() {
+            roomId = document.getElementById('roomId').value.trim();
+            if (!roomId) {
+                alert('Please enter a room ID');
+                return;
+            }
+            
+            // Connect to signaling server
+            socket = io('https://webrtc-signaling-server.onrender.com'); // Free signaling server
+            
+            socket.on('connect', () => {
+                updateStatus('🟡 Connected to signaling server');
+                socket.emit('create-or-join', roomId, 'broadcaster');
+            });
+            
+            socket.on('room-joined', async () => {
+                updateStatus('🟡 Room joined, starting screen share...');
+                await startScreenShare();
+            });
+            
+            socket.on('viewer-joined', async () => {
+                updateStatus('🟡 Viewer joined, creating connection...');
+                await createOffer();
+            });
+            
+            socket.on('answer', async (data) => {
+                updateStatus('🟡 Answer received, establishing connection...');
+                await peerConnection.setRemoteDescription(new RTCSessionDescription(data));
+            });
+            
+            socket.on('ice-candidate', async (data) => {
+                if (peerConnection) {
+                    await peerConnection.addIceCandidate(new RTCIceCandidate(data.candidate));
+                }
+            });
+            
+            socket.on('viewer-left', () => {
+                updateStatus('🟡 Viewer disconnected');
+                if (peerConnection) {
+                    peerConnection.close();
+                    peerConnection = null;
+                }
+            });
+        }
+        
+        async function startScreenShare() {
+            try {
+                // Get screen stream
+                const screenStream = await navigator.mediaDevices.getDisplayMedia({ 
+                    video: true, 
+                    audio: systemAudioEnabled 
+                });
+                
+                // Get microphone
+                const micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                
+                // Combine streams
+                localStream = new MediaStream();
+                screenStream.getVideoTracks().forEach(track => localStream.addTrack(track));
+                
+                if (systemAudioEnabled && screenStream.getAudioTracks().length) {
+                    screenStream.getAudioTracks().forEach(track => localStream.addTrack(track));
+                } else {
+                    micStream.getAudioTracks().forEach(track => localStream.addTrack(track));
+                }
+                
+                // Show preview
+                const video = document.getElementById('preview');
+                video.srcObject = localStream;
+                video.style.display = 'block';
+                
+                document.querySelector('.room-input').style.display = 'none';
+                document.getElementById('controls').style.display = 'flex';
+                updateStatus('🟢 Screen sharing active');
+                
+                // Handle screen share stop
+                screenStream.getVideoTracks()[0].onended = () => {
+                    stopSharing();
+                };
+                
+            } catch (err) {
+                updateStatus('❌ Error: ' + err.message);
+                console.error(err);
+            }
+        }
+        
+        async function createOffer() {
+            if (!localStream) return;
+            
+            peerConnection = new RTCPeerConnection(configuration);
+            
+            // Add tracks
+            localStream.getTracks().forEach(track => {
+                peerConnection.addTrack(track, localStream);
+            });
+            
+            // Handle ICE candidates
+            peerConnection.onicecandidate = (event) => {
+                if (event.candidate) {
+                    socket.emit('ice-candidate', { candidate: event.candidate, roomId });
+                }
+            };
+            
+            // Handle connection state
+            peerConnection.onconnectionstatechange = () => {
+                if (peerConnection.connectionState === 'connected') {
+                    updateStatus('🟢 LIVE - Streaming to viewer');
+                } else if (peerConnection.connectionState === 'disconnected') {
+                    updateStatus('🔴 Disconnected from viewer');
+                }
+            };
+            
+            // Create offer
+            const offer = await peerConnection.createOffer();
+            await peerConnection.setLocalDescription(offer);
+            socket.emit('offer', { sdp: offer, roomId });
+            updateStatus('🟡 Offer sent, waiting for viewer...');
+        }
+        
+        function stopSharing() {
+            if (localStream) {
+                localStream.getTracks().forEach(track => track.stop());
+            }
+            if (peerConnection) {
+                peerConnection.close();
+                peerConnection = null;
+            }
+            if (socket) {
+                socket.disconnect();
+            }
+            
+            document.getElementById('preview').style.display = 'none';
+            document.querySelector('.room-input').style.display = 'block';
+            document.getElementById('controls').style.display = 'none';
+            updateStatus('⚫ Sharing stopped');
+        }
+        
+        function toggleMic() {
+            if (!localStream) return;
+            const audioTracks = localStream.getAudioTracks();
+            audioTracks.forEach(track => track.enabled = !track.enabled);
+            micEnabled = !micEnabled;
+            document.getElementById('micBtn').innerHTML = micEnabled ? '🎤 Mic ON' : '🎤 Mic OFF';
+        }
+        
+        function toggleSystemAudio() {
+            systemAudioEnabled = !systemAudioEnabled;
+            document.getElementById('audioBtn').innerHTML = systemAudioEnabled ? '🔊 System Audio ON' : '🔊 System Audio OFF';
+            if (localStream && confirm('System audio change requires restart. Restart now?')) {
+                stopSharing();
+                setTimeout(() => createRoom(), 1000);
+            }
+        }
+        
+        function updateStatus(msg) {
+            document.getElementById('status').innerHTML = msg;
+            console.log(msg);
+        }
+        
+        document.getElementById('createRoomBtn').onclick = createRoom;
+        document.getElementById('stopBtn').onclick = stopSharing;
+        document.getElementById('micBtn').onclick = toggleMic;
+        document.getElementById('audioBtn').onclick = toggleSystemAudio;
+    </script>
+</body>
+</html>
