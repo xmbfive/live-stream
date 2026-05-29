@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Live Viewer</title>
+    <meta charset="UTF-8">
+    <style>
+        body { background: #000; font-family: Arial, sans-serif; margin: 0; display: flex; justify-content: center; align-items: center; min-height: 100vh; flex-direction: column; }
+        video { width: 100%; max-width: 1200px; background: #111; border-radius: 8px; }
+        .controls { position: fixed; bottom: 20px; left: 20px; right: 20px; background: rgba(0,0,0,0.8); padding: 15px; border-radius: 10px; text-align: center; }
+        input { padding: 10px; font-size: 16px; margin: 5px; border-radius: 5px; border: none; width: 200px; }
+        button { padding: 10px 20px; font-size: 14px; font-weight: bold; border: none; border-radius: 5px; cursor: pointer; background: #2ecc71; color: #fff; }
+        .status { position: fixed; top: 20px; right: 20px; background: rgba(0,0,0,0.7); padding: 8px 15px; border-radius: 20px; color: #ffaa00; font-size: 12px; }
+        .info { color: #fff; margin-bottom: 20px; }
+    </style>
+</head>
+<body>
+    <div class="info">📡 Live Stream Viewer</div>
+    <video id="remoteVideo" autoplay playsinline></video>
+    
+    <div class="controls">
+        <input type="text" id="roomId" placeholder="Enter Room ID" value="room123">
+        <button id="joinBtn">Join Stream</button>
+    </div>
+    
+    <div class="status" id="status">⚫ Not connected</div>
+
+    <script src="https://cdn.socket.io/4.5.0/socket.io.min.js"></script>
+    <script>
+        let peerConnection = null;
+        let socket = null;
+        let roomId = null;
+        
+        const configuration = {
+            iceServers: [
+                { urls: 'stun:stun.l.google.com:19302' },
+                { urls: 'stun:stun1.l.google.com:19302' }
+            ]
+        };
+        
+        function joinRoom() {
+            roomId = document.getElementById('roomId').value.trim();
+            if (!roomId) {
+                alert('Please enter a room ID');
+                return;
+            }
+            
+            updateStatus('🟡 Connecting to signaling server...');
+            
+            socket = io('https://webrtc-signaling-server.onrender.com');
+            
+            socket.on('connect', () => {
+                updateStatus('🟡 Connected, joining room...');
+                socket.emit('create-or-join', roomId, 'viewer');
+            });
+            
+            socket.on('room-joined', () => {
+                updateStatus('🟡 Room joined, waiting for broadcaster...');
+                createPeerConnection();
+            });
+            
+            socket.on('broadcaster-ready', () => {
+                updateStatus('🟡 Broadcaster ready');
+            });
+            
+            socket.on('offer', async (data) => {
+                updateStatus('🟡 Offer received, accepting...');
+                await peerConnection.setRemoteDescription(new RTCSessionDescription(data.sdp));
+                const answer = await peerConnection.createAnswer();
+                await peerConnection.setLocalDescription(answer);
+                socket.emit('answer', { sdp: answer, roomId });
+                updateStatus('🟡 Answer sent, establishing connection...');
+            });
+            
+            socket.on('ice-candidate', async (data) => {
+                if (peerConnection) {
+                    await peerConnection.addIceCandidate(new RTCIceCandidate(data.candidate));
+                }
+            });
+            
+            socket.on('broadcaster-left', () => {
+                updateStatus('🔴 Broadcaster disconnected');
+                if (peerConnection) {
+                    peerConnection.close();
+                    peerConnection = null;
+                }
+                document.getElementById('remoteVideo').srcObject = null;
+            });
+        }
+        
+        function createPeerConnection() {
+            peerConnection = new RTCPeerConnection(configuration);
+            
+            peerConnection.ontrack = (event) => {
+                updateStatus('🟢 LIVE - Streaming');
+                document.getElementById('remoteVideo').srcObject = event.streams[0];
+            };
+            
+            peerConnection.onicecandidate = (event) => {
+                if (event.candidate) {
+                    socket.emit('ice-candidate', { candidate: event.candidate, roomId });
+                }
+            };
+            
+            peerConnection.onconnectionstatechange = () => {
+                if (peerConnection.connectionState === 'connected') {
+                    updateStatus('🟢 LIVE');
+                } else if (peerConnection.connectionState === 'disconnected') {
+                    updateStatus('🔴 Disconnected');
+                }
+            };
+        }
+        
+        function updateStatus(msg) {
+            document.getElementById('status').innerHTML = msg;
+            console.log(msg);
+        }
+        
+        document.getElementById('joinBtn').onclick = joinRoom;
+    </script>
+</body>
+</html>
